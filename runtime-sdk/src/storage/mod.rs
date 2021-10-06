@@ -1,6 +1,7 @@
 //! Storage.
 use oasis_core_runtime::storage::mkvs::Iterator;
 
+mod confidential;
 mod hashed;
 mod mkvs;
 mod overlay;
@@ -51,6 +52,7 @@ impl<S: Store + ?Sized> Store for &mut S {
     }
 }
 
+pub use confidential::ConfidentialStore;
 pub use hashed::HashedStore;
 pub use mkvs::MKVSStore;
 pub use overlay::OverlayStore;
