@@ -298,8 +298,10 @@ impl Module {
         ctx: &mut C,
         mut args: types::EstimateGasQuery,
     ) -> Result<u64, Error> {
-        // Assume maximum amount of gas and a reasonable maximum fee.
-        args.tx.auth_info.fee.gas = u64::MAX;
+        println!("Estimate gas start: {:?}", args);
+        let batch_gas_limit = Self::params(ctx.runtime_state()).max_batch_gas;
+        // Assume reasonable amount of gas and a reasonable maximum fee.
+        args.tx.auth_info.fee.gas = batch_gas_limit;
         args.tx.auth_info.fee.amount =
             token::BaseUnits::new(u64::MAX.into(), token::Denomination::NATIVE);
         // Estimate transaction size. Since the transaction given to us is not signed, we need to
@@ -338,7 +340,7 @@ impl Module {
 
         // Update the address used within the transaction when caller address is passed.
         let mut extra_gas = 0;
-        if let Some(caller) = args.caller {
+        if let Some(caller) = args.caller.clone() {
             let address_spec = transaction::AddressSpec::Internal(caller);
             match args.tx.auth_info.signer_info.first_mut() {
                 Some(si) => si.address_spec = address_spec,
@@ -357,12 +359,21 @@ impl Module {
             extra_gas += params.gas_costs.auth_signature;
         }
 
+        // println!(
+        //     "Estimate gas simulation: {:?}, extra_gas: {:?}",
+        //     args, extra_gas
+        // );
         ctx.with_simulation(|mut sim_ctx| {
             sim_ctx.with_tx(tx_size, args.tx, |mut tx_ctx, call| {
-                dispatcher::Dispatcher::<C::Runtime>::dispatch_tx_call(&mut tx_ctx, call);
+                let result =
+                    dispatcher::Dispatcher::<C::Runtime>::dispatch_tx_call(&mut tx_ctx, call);
                 // Warning: we don't report success or failure. If the call fails, we still report
                 // how much gas it uses while it fails.
                 let gas_used = *tx_ctx.value::<u64>(CONTEXT_KEY_GAS_USED).or_default();
+                println!(
+                    "Gas used: {:?}, extra_gas: {:?}, result: {:?}",
+                    gas_used, extra_gas, result
+                );
                 Ok(gas_used + extra_gas)
             })
         })

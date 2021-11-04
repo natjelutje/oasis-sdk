@@ -275,7 +275,7 @@ fn test_query_estimate_gas() {
 
     // Test estimation with specified caller.
     let args = types::EstimateGasQuery {
-        caller: Some(keys::alice::address()),
+        caller: Some(types::CallerAddress::Address(keys::alice::address())),
         tx,
     };
 

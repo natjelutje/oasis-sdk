@@ -9,9 +9,10 @@ pub mod types;
 use std::collections::BTreeMap;
 
 use evm::{
-    executor::{MemoryStackState, PrecompileFn, StackExecutor, StackSubstateMetadata},
+    executor::{MemoryStackState, PrecompileFn, StackExecutor, StackState, StackSubstateMetadata},
     Config as EVMConfig,
 };
+use once_cell::sync::Lazy;
 use thiserror::Error;
 
 use oasis_runtime_sdk::{
@@ -265,22 +266,28 @@ impl<Cfg: Config> API for Module<Cfg> {
         value: U256,
         data: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
+        println!("at call, auth_info: {:?}", ctx.tx_auth_info());
         let caller = Self::derive_caller(ctx)?;
+        println!("derived caller: {:?}", caller);
 
         if ctx.is_check_only() && !ctx.are_expensive_queries_allowed() {
             // Only fast checks are allowed.
             return Ok(vec![]);
         }
+        println!("will do_evm now...");
 
         let rsp = Self::do_evm(caller, ctx, |exec, gas_limit| {
-            exec.transact_call(
+            println!("CAll gas_limit: {:?}", gas_limit);
+            let x = exec.transact_call(
                 caller.into(),
                 address.into(),
                 value.into(),
                 data,
                 gas_limit,
                 vec![],
-            )
+            );
+            println!("Result call {:?}", x);
+            x
         });
 
         // Always return success in CheckTx, as we might not have up-to-date state.
@@ -358,23 +365,35 @@ impl<Cfg: Config> API for Module<Cfg> {
             };
             sctx.with_tx(0, call_tx, |mut txctx, _call| {
                 Self::do_evm(caller, &mut txctx, |exec, gas_limit| {
-                    exec.transact_call(
+                    println!("Simulate call gas_limit: {:?}", gas_limit);
+                    let x = exec.transact_call(
                         caller.into(),
                         address.into(),
                         value.into(),
                         data,
                         gas_limit,
                         vec![],
-                    )
+                    );
+                    println!("Result simulate {:?}", x);
+                    x
                 })
             })
         })
     }
 }
 
+static EVM_CONFIG: Lazy<EVMConfig> = Lazy::new(|| {
+    let mut cfg = EVMConfig::london();
+    // cfg.call_l64_after_gas = false;
+    cfg
+});
+static EVM_SIMULATE: Lazy<EVMConfig> = Lazy::new(|| {
+    let mut cfg = EVMConfig::london();
+    cfg.estimate = true;
+    // cfg.call_l64_after_gas = false;
+    cfg
+});
 impl<Cfg: Config> Module<Cfg> {
-    const EVM_CONFIG: EVMConfig = EVMConfig::london();
-
     fn do_evm<C, F, V>(source: H160, ctx: &mut C, f: F) -> Result<V, Error>
     where
         F: FnOnce(
@@ -388,6 +407,9 @@ impl<Cfg: Config> Module<Cfg> {
         ) -> (evm::ExitReason, V),
         C: TxContext,
     {
+        let is_simulation = ctx.is_simulation();
+        let is_check = ctx.is_check_only();
+        println!("do EVM, is_check: {:?}", is_check);
         let gas_limit: u64 = core::Module::remaining_tx_gas(ctx);
         let gas_price: primitive_types::U256 = ctx.tx_auth_info().fee.gas_price().into();
         let fee_denomination = ctx.tx_auth_info().fee.amount.denomination().clone();
@@ -403,23 +425,50 @@ impl<Cfg: Config> Module<Cfg> {
             .ok_or(Error::FeeOverflow)?;
 
         let mut backend = backend::Backend::<'_, C, Cfg>::new(ctx, vicinity);
-        let metadata = StackSubstateMetadata::new(gas_limit, &Self::EVM_CONFIG);
+        let cfg = if is_simulation {
+            &*EVM_SIMULATE
+        } else {
+            &*EVM_CONFIG
+        };
+
+        let metadata = StackSubstateMetadata::new(gas_limit, cfg);
         let stackstate = MemoryStackState::new(metadata, &backend);
         let mut executor = StackExecutor::new_with_precompiles(
             stackstate,
-            &Self::EVM_CONFIG,
+            cfg,
             &*precompile::PRECOMPILED_CONTRACT,
         );
 
+        println!("running EVM: is_check: {:?}", is_check);
         // Run EVM.
         let (exit_reason, exit_value) = f(&mut executor, gas_limit);
+        println!(
+            "ran EVM: exit_reason: {:?}, is_check: {:?}",
+            exit_reason, is_check,
+        );
+
+        let gas_used = executor.used_gas();
+        let total_gas_used = executor.state().metadata().gasometer().total_used_gas();
+
+        println!(
+            "gas used: {:?}, total_gas_used: {:?}, gas_limit: {:?} is_check: {:?}",
+            gas_used, total_gas_used, gas_limit, is_check,
+        );
 
         if !exit_reason.is_succeed() {
+            println!(
+                "running EVM: exitting for reason: {:?} is_check: {:?}",
+                exit_reason, is_check,
+            );
             return Err(Error::EVMError(format!("{:?}", exit_reason)));
         }
 
         let gas_used = executor.used_gas();
 
+        println!(
+            "gas used: {:?} gas_limit: {:?} is_check: {:?}",
+            gas_used, gas_limit, is_check,
+        );
         if gas_used > gas_limit {
             // NOTE: This should never happen as the gas was accounted for in advance.
             core::Module::use_tx_gas(ctx, gas_limit)?;
@@ -437,6 +486,8 @@ impl<Cfg: Config> Module<Cfg> {
 
         core::Module::use_tx_gas(ctx, gas_used)?;
 
+        println!("gas used: {:?} is_check: {:?}", gas_used, is_check,);
+
         // Move the difference from the fee accumulator back to the caller.
         let caller_address = Cfg::map_address(source.into());
         Cfg::Accounts::move_from_fee_accumulator(
@@ -445,6 +496,8 @@ impl<Cfg: Config> Module<Cfg> {
             &token::BaseUnits::new(return_fee.as_u128(), fee_denomination),
         )
         .map_err(|_| Error::InsufficientBalance)?;
+
+        println!("exittiing is_check: {:?}", is_check);
 
         Ok(exit_value)
     }

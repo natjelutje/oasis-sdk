@@ -16,6 +16,7 @@ use oasis_runtime_sdk::{
 
 use crate::{
     abi::{ExecutionContext, ExecutionResult},
+    results::core::types::CallerAddress,
     types::ContractEvent,
     wasm, Config, Error, Parameters, MODULE_NAME,
 };
@@ -157,7 +158,7 @@ fn process_subcalls<Cfg: Config, C: TxContext>(
                             signer_info: vec![transaction::SignerInfo {
                                 // The call is being performed on the contract's behalf.
                                 address_spec: transaction::AddressSpec::Internal(
-                                    contract.instance_info.address(),
+                                    CallerAddress::Address(contract.instance_info.address()),
                                 ),
                                 nonce: 0,
                             }],

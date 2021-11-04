@@ -7,7 +7,9 @@ use crate::{
         multisig,
         signature::{self, PublicKey, Signature},
     },
+    modules::core::types::CallerAddress,
     types::{
+        address,
         address::{Address, SignatureAddressSpec},
         token,
     },
@@ -181,7 +183,7 @@ pub enum AddressSpec {
 
     /// For internal child calls (cannot be serialized/deserialized).
     #[cbor(skip)]
-    Internal(Address),
+    Internal(CallerAddress),
 }
 
 impl AddressSpec {
@@ -190,7 +192,12 @@ impl AddressSpec {
         match self {
             AddressSpec::Signature(spec) => Address::from_sigspec(spec),
             AddressSpec::Multisig(config) => Address::from_multisig(config.clone()),
-            AddressSpec::Internal(address) => *address,
+            AddressSpec::Internal(CallerAddress::Address(address)) => *address,
+            AddressSpec::Internal(CallerAddress::EthAddress(address)) => Address::new(
+                address::ADDRESS_V0_SECP256K1ETH_CONTEXT,
+                address::ADDRESS_V0_VERSION,
+                address.as_ref(),
+            ),
         }
     }
 
