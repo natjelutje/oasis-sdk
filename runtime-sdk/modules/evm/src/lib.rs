@@ -9,10 +9,9 @@ pub mod types;
 use std::collections::BTreeMap;
 
 use evm::{
-    executor::{MemoryStackState, PrecompileFn, StackExecutor, StackState, StackSubstateMetadata},
+    executor::{MemoryStackState, PrecompileFn, StackExecutor, StackSubstateMetadata},
     Config as EVMConfig,
 };
-use once_cell::sync::Lazy;
 use thiserror::Error;
 
 use oasis_runtime_sdk::{
@@ -117,9 +116,9 @@ pub enum Error {
     #[sdk_error(code = 1)]
     InvalidArgument,
 
-    #[error("EVM error: {0}")]
+    #[error("execution failed: {0}")]
     #[sdk_error(code = 2)]
-    EVMError(String),
+    ExecutionFailed(String),
 
     #[error("invalid signer type")]
     #[sdk_error(code = 3)]
@@ -141,9 +140,101 @@ pub enum Error {
     #[sdk_error(code = 7)]
     Forbidden,
 
+    #[error("reverted: {0}")]
+    #[sdk_error(code = 8)]
+    Reverted(String),
+
     #[error("core: {0}")]
     #[sdk_error(transparent)]
     Core(#[from] CoreError),
+}
+
+impl From<evm::ExitError> for Error {
+    fn from(e: evm::ExitError) -> Error {
+        use evm::ExitError::*;
+        let msg = match e {
+            StackUnderflow => "stack underflow",
+            StackOverflow => "stack overflow",
+            InvalidJump => "invalid jump",
+            InvalidRange => "invalid range",
+            DesignatedInvalid => "designated invalid",
+            CallTooDeep => "call too deep",
+            CreateCollision => "create collision",
+            CreateContractLimit => "create contract limit",
+            InvalidCode => "invalid code",
+
+            OutOfOffset => "out of offset",
+            OutOfGas => "out of gas",
+            OutOfFund => "out of fund",
+
+            #[allow(clippy::upper_case_acronyms)]
+            PCUnderflow => "PC underflow",
+
+            CreateEmpty => "create empty",
+
+            Other(msg) => return Error::ExecutionFailed(msg.to_string()),
+        };
+        Error::ExecutionFailed(msg.to_string())
+    }
+}
+
+impl From<evm::ExitFatal> for Error {
+    fn from(e: evm::ExitFatal) -> Error {
+        use evm::ExitFatal::*;
+        let msg = match e {
+            NotSupported => "not supported",
+            UnhandledInterrupt => "unhandled interrupt",
+            CallErrorAsFatal(err) => return err.into(),
+            Other(msg) => return Error::ExecutionFailed(msg.to_string()),
+        };
+        Error::ExecutionFailed(msg.to_string())
+    }
+}
+
+/// Process an EVM result to return either a successful result or a (readable) error reason.
+fn process_evm_result(exit_reason: evm::ExitReason, data: Vec<u8>) -> Result<Vec<u8>, Error> {
+    match exit_reason {
+        evm::ExitReason::Succeed(_) => Ok(data),
+        evm::ExitReason::Revert(_) => {
+            // Decode revert reason, format is as follows:
+            //
+            // 08c379a0                                                         <- Function selector
+            // 0000000000000000000000000000000000000000000000000000000000000020 <- Offset of string return value
+            // 0000000000000000000000000000000000000000000000000000000000000047 <- Length of string return value (the revert reason)
+            // 6d7946756e6374696f6e206f6e6c79206163636570747320617267756d656e74 <- First 32 bytes of the revert reason
+            // 7320776869636820617265206772656174686572207468616e206f7220657175 <- Next 32 bytes of the revert reason
+            // 616c20746f203500000000000000000000000000000000000000000000000000 <- Last 7 bytes of the revert reason
+            //
+            const ERROR_STRING_SELECTOR: &[u8] = &[0x08, 0xc3, 0x79, 0xa0]; // Keccak256("Error(string)")
+            const FIELD_OFFSET_START: usize = 4;
+            const FIELD_LENGTH_START: usize = FIELD_OFFSET_START + 32;
+            const FIELD_REASON_START: usize = FIELD_LENGTH_START + 32;
+            const MIN_SIZE: usize = FIELD_REASON_START;
+            const MAX_REASON_SIZE: usize = 1024;
+            if data.len() < MIN_SIZE || !data.starts_with(ERROR_STRING_SELECTOR) {
+                // TODO: Could also return Base64-encoded raw reason?
+                return Err(Error::Reverted("unknown".to_string()));
+            }
+            // Decode and validate length.
+            let mut length =
+                primitive_types::U256::from(&data[FIELD_LENGTH_START..FIELD_LENGTH_START + 32])
+                    .low_u32() as usize;
+            if FIELD_REASON_START + length > data.len() {
+                // TODO: Could also return Base64-encoded raw reason?
+                return Err(Error::Reverted("unknown".to_string()));
+            }
+            // Make sure that this doesn't ever return huge reason values as this is at least
+            // somewhat contract-controlled.
+            if length > MAX_REASON_SIZE {
+                length = MAX_REASON_SIZE;
+            }
+            let reason =
+                String::from_utf8_lossy(&data[FIELD_REASON_START..FIELD_REASON_START + length]);
+            Err(Error::Reverted(reason.to_string()))
+        }
+        evm::ExitReason::Error(err) => Err(err.into()),
+        evm::ExitReason::Fatal(err) => Err(err.into()),
+    }
 }
 
 /// Gas costs.
@@ -266,28 +357,22 @@ impl<Cfg: Config> API for Module<Cfg> {
         value: U256,
         data: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
-        println!("at call, auth_info: {:?}", ctx.tx_auth_info());
         let caller = Self::derive_caller(ctx)?;
-        println!("derived caller: {:?}", caller);
 
         if ctx.is_check_only() && !ctx.are_expensive_queries_allowed() {
             // Only fast checks are allowed.
             return Ok(vec![]);
         }
-        println!("will do_evm now...");
 
         let rsp = Self::do_evm(caller, ctx, |exec, gas_limit| {
-            println!("CAll gas_limit: {:?}", gas_limit);
-            let x = exec.transact_call(
+            exec.transact_call(
                 caller.into(),
                 address.into(),
                 value.into(),
                 data,
                 gas_limit,
                 vec![],
-            );
-            println!("Result call {:?}", x);
-            x
+            )
         });
 
         // Always return success in CheckTx, as we might not have up-to-date state.
@@ -365,36 +450,24 @@ impl<Cfg: Config> API for Module<Cfg> {
             };
             sctx.with_tx(0, call_tx, |mut txctx, _call| {
                 Self::do_evm(caller, &mut txctx, |exec, gas_limit| {
-                    println!("Simulate call gas_limit: {:?}", gas_limit);
-                    let x = exec.transact_call(
+                    exec.transact_call(
                         caller.into(),
                         address.into(),
                         value.into(),
                         data,
                         gas_limit,
                         vec![],
-                    );
-                    println!("Result simulate {:?}", x);
-                    x
+                    )
                 })
             })
         })
     }
 }
 
-static EVM_CONFIG: Lazy<EVMConfig> = Lazy::new(|| {
-    let mut cfg = EVMConfig::london();
-    // cfg.call_l64_after_gas = false;
-    cfg
-});
-static EVM_SIMULATE: Lazy<EVMConfig> = Lazy::new(|| {
-    let mut cfg = EVMConfig::london();
-    cfg.estimate = true;
-    // cfg.call_l64_after_gas = false;
-    cfg
-});
 impl<Cfg: Config> Module<Cfg> {
-    fn do_evm<C, F, V>(source: H160, ctx: &mut C, f: F) -> Result<V, Error>
+    const EVM_CONFIG: EVMConfig = EVMConfig::london();
+
+    fn do_evm<C, F>(source: H160, ctx: &mut C, f: F) -> Result<Vec<u8>, Error>
     where
         F: FnOnce(
             &mut StackExecutor<
@@ -404,12 +477,9 @@ impl<Cfg: Config> Module<Cfg> {
                 BTreeMap<primitive_types::H160, PrecompileFn>,
             >,
             u64,
-        ) -> (evm::ExitReason, V),
+        ) -> (evm::ExitReason, Vec<u8>),
         C: TxContext,
     {
-        let is_simulation = ctx.is_simulation();
-        let is_check = ctx.is_check_only();
-        println!("do EVM, is_check: {:?}", is_check);
         let gas_limit: u64 = core::Module::remaining_tx_gas(ctx);
         let gas_price: primitive_types::U256 = ctx.tx_auth_info().fee.gas_price().into();
         let fee_denomination = ctx.tx_auth_info().fee.amount.denomination().clone();
@@ -425,50 +495,22 @@ impl<Cfg: Config> Module<Cfg> {
             .ok_or(Error::FeeOverflow)?;
 
         let mut backend = backend::Backend::<'_, C, Cfg>::new(ctx, vicinity);
-        let cfg = if is_simulation {
-            &*EVM_SIMULATE
-        } else {
-            &*EVM_CONFIG
-        };
-
-        let metadata = StackSubstateMetadata::new(gas_limit, cfg);
+        let metadata = StackSubstateMetadata::new(gas_limit, &Self::EVM_CONFIG);
         let stackstate = MemoryStackState::new(metadata, &backend);
         let mut executor = StackExecutor::new_with_precompiles(
             stackstate,
-            cfg,
+            &Self::EVM_CONFIG,
             &*precompile::PRECOMPILED_CONTRACT,
         );
 
-        println!("running EVM: is_check: {:?}", is_check);
-        // Run EVM.
+        // Run EVM and process the result.
         let (exit_reason, exit_value) = f(&mut executor, gas_limit);
-        println!(
-            "ran EVM: exit_reason: {:?}, is_check: {:?}",
-            exit_reason, is_check,
-        );
-
-        let gas_used = executor.used_gas();
-        let total_gas_used = executor.state().metadata().gasometer().total_used_gas();
-
-        println!(
-            "gas used: {:?}, total_gas_used: {:?}, gas_limit: {:?} is_check: {:?}",
-            gas_used, total_gas_used, gas_limit, is_check,
-        );
-
-        if !exit_reason.is_succeed() {
-            println!(
-                "running EVM: exitting for reason: {:?} is_check: {:?}",
-                exit_reason, is_check,
-            );
-            return Err(Error::EVMError(format!("{:?}", exit_reason)));
-        }
+        let exit_value = process_evm_result(exit_reason, exit_value);
+        println!("exit value: {:?}", exit_value);
+        let exit_value = exit_value?;
 
         let gas_used = executor.used_gas();
 
-        println!(
-            "gas used: {:?} gas_limit: {:?} is_check: {:?}",
-            gas_used, gas_limit, is_check,
-        );
         if gas_used > gas_limit {
             // NOTE: This should never happen as the gas was accounted for in advance.
             core::Module::use_tx_gas(ctx, gas_limit)?;
@@ -486,8 +528,6 @@ impl<Cfg: Config> Module<Cfg> {
 
         core::Module::use_tx_gas(ctx, gas_used)?;
 
-        println!("gas used: {:?} is_check: {:?}", gas_used, is_check,);
-
         // Move the difference from the fee accumulator back to the caller.
         let caller_address = Cfg::map_address(source.into());
         Cfg::Accounts::move_from_fee_accumulator(
@@ -496,8 +536,6 @@ impl<Cfg: Config> Module<Cfg> {
             &token::BaseUnits::new(return_fee.as_u128(), fee_denomination),
         )
         .map_err(|_| Error::InsufficientBalance)?;
-
-        println!("exittiing is_check: {:?}", is_check);
 
         Ok(exit_value)
     }
