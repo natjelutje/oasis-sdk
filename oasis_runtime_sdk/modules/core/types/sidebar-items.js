@@ -1,0 +1,1 @@
+initSidebarItems({"constant":[["VERSION_GLOBAL_KEY","Key in the versions map used for the global state version."]],"struct":[["CallDataPublicKeyQueryResponse","Response to the call data public key query."],["EstimateGasQuery","Arguments for the EstimateGas query."],["Metadata","Per-module metadata."]]});
