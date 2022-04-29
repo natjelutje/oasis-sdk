@@ -10,7 +10,7 @@ replace (
 )
 
 require (
-	github.com/btcsuite/btcd v0.22.0-beta
+	github.com/btcsuite/btcd v0.22.1
 	github.com/golang/snappy v0.0.4
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20210716083614-f38f8e8b0b84
 	github.com/oasisprotocol/deoxysii v0.0.0-20200527154044-851aec403956
