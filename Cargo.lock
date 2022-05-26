@@ -1499,9 +1499,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.7.0"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c748cfe47cb8da225c37595b3108bea1c198c84aaae8ea0ba76d01dda9fc803"
+checksum = "8015d95cb7b2ddd3c0d32ca38283ceb1eea09b4713ee380bceb942d85a244228"
 dependencies = [
  "hashbrown",
 ]
@@ -1980,7 +1980,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
- "lru 0.7.0",
+ "lru 0.7.6",
  "num-traits",
  "oasis-cbor",
  "oasis-contract-sdk-crypto",
